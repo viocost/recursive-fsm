@@ -1,162 +1,3 @@
-/*
- * State map constraints
- *
- * 1. Any state can be either leaf state or region
- * 2. Region state must have property region: true
- * 3. There must be exactly ONE region or state that is root.
- * 4. Any region can be either concurrent or non-concurrent
- * 5. Non-concurrent region has exactly one active child state when active
- * 6. Concurrent region assumes to have one or more child regions
- * 7. In concurrent region when active all its children regions are active
- * 8. Concurrent region cannot have leaf states as children
- * 9. Non-concurrent region can have memory enabled, so when re-entered, the state will be set to where it left off.
- * 10. By default a region considered to be non-concurrent. To make region concurrent need to set concurrent: true in state map.
- *
- *
- * Example:
- *
- * Imagine an electircal device that has 2 modes:
- *  1. Lumen
- *  2. Music + rotation
- *
- *  It cannot do Lumen and play music/rotate at the same time.
- *
- *  Lumen mode has following substates:
- *    - green
- *    - yellow
- *    - red
- *    - off (initial)
- *
- * Music + rotation has 2 concurrent regions: music and rotation.
- *
- * Music substates are:
- *   - Playing
- *   - Off
- *
- * Rotation substates are
- *  - Off
- *  - Rotating left
- *  - Rotating right
- *
- * We also have power state, which can be on or off.
- * If power goes off it forces the system out of all states.
- *
- * Here's the state map for such machine:
- *
-  {
-     powerOff: {
-        root: true,
-        transitions: {
-            powerOn: {
-                state: "powerOn",
-                actions: ...
-            }
-        }
-     },
-
-     powerOn: {
-         region: true,
-         transitions: {
-             powerOff: {
-                 state: "powerOff",
-                 actions: ...
-             }
-         }
-     },
-
-     lumen: {
-         region: true,
-         parent: "powerOn",
-         transition: {
-             switchToMusicRotation: {
-                 state: "musicRotation"
-             }
-         }
-     },
-
-     musicRotation: {
-         region: true,
-         concurrent: true,
-         parent: "powerOn",
-         initial: true,
-         transitions: {
-             switchToLumen: {
-                 state: "lumen"
-             }
-         }
-
-     },
-
-     music: {
-         region: true,
-         parent: "musicRotation"
-     },
-
-     rotation: {
-         region: true,
-         parent: "musicRotation"
-     },
-
-     musicPlaying: {
-         parent: "music",
-         transitions: {
-             stopMusic: {
-                 state: "musicOff",
-             }
-         }
-     },
-
-     musicOff: {
-         parent: "music",
-         initial: true,
-         transitions: {
-             playMusic: {
-                 state: "musicPlaying",
-             }
-         }
-     },
-
-     rotationOff: {
-         parent: "rotation",
-         initial: true,
-         transitions: {
-             rotateLeft: {
-                 state: "rotationLeft"
-             },
-             rotateRight: {
-                 state: "rotationRight"
-             }
-         }
-     },
-
-     rotationLeft: {
-
-         parent: "rotation",
-         transitions: {
-             stopRotation: {
-                 state: "rotationOff"
-             },
-             rotateRight: {
-                 state: "rotationRight"
-             }
-         }
-     }
-
-     rotationRight: {
-         parent: "rotation",
-         transitions: {
-             rotateLeft: {
-                 state: "rotationLeft"
-             },
-             stopRotation: {
-                 state: "rotationOff"
-             }
-         }
-     }
-  }
- /
-
-*/
 
 const { inspect } = require("util")
 const { createDerivedErrorClasses } = require("./DynamicError");
@@ -175,6 +16,7 @@ const err = createDerivedErrorClasses(StateMachineError, {
     illegalEventName: "IllegalEventName",
     actionTypeInvalid: "ActionTypeInvalid",
     cannotDetermineAction: "CannotDetermineValidAction",
+    invalidSubstateType: "InvalidSubstateType"
 })
 
 
@@ -199,12 +41,14 @@ class StateMachine {
     }
 
 
-    constructor(obj, { stateMap, name = "State Machine" },
+    constructor(obj, { stateMap, name = "State Machine", memory: true, isSubstate: false },
         { msgNotExistMode = StateMachine.Discard, traceLevel = StateMachine.TraceLevel.INFO} = {}){
 
         this.validateStateMap(stateMap)
 
         this.obj = obj;
+
+        this.memory = memory;
 
         this.error = false;
         this.traceLevel = traceLevel;
@@ -263,6 +107,16 @@ class StateMachine {
     }
 
 
+    /**
+     * Event desicription here means
+     * an appropriate transition for the event depending on guards if any are described
+     *
+     * This function will try to evaluate guards and determine a signle right actions.
+     * If more than one transition is found - that's an error.
+     * If none of the transitions found - that measn that guards haven't passed.
+     *
+     *
+     */
     getEventDescription(eventName, eventArgs){
         let descriptions = this.stateMap[this.state].transitions[eventName];
 
@@ -292,7 +146,7 @@ class StateMachine {
         let guards = Array.isArray(evDescription.guards) ? evDescription.guards : [ evDescription.guards ];
 
         for(let guard of guards){
-            if(!guard.call(this.obj, this, eventName, eventArgs)) {
+            if(!guard.call(this.obj, eventArgs, this, eventName)) {
                 res = false;
                 break;
             }
@@ -324,40 +178,51 @@ class StateMachine {
             return;
         }
 
+        // Checking guards and finding appropriate transition
         let eventDescription = this.getEventDescription(eventName, eventArgs);
 
+        // If no transition found - return
         if(undefined === eventDescription){
             if(this.isInfo()) console.log(`  NO VALID ACTION FOUND for ${eventName}`);
             return
         }
 
+        // Getting list of actions and new state if present
         let actions =  eventDescription["actions"];
         let newState = eventDescription["state"]
 
+        // Handling state exit
         if (newState) {
-            if (!(newState in this.stateMap)){
 
+            // Error check for non-existent state
+            if (!(newState in this.stateMap)){
                 this.error = true;
                 throw new err.stateNotExist(newState);
             }
 
+            this.suspendSubstates();
+
+            // Performing local exit actions;
             let exitActions = this.stateMap[this.state].exit;
-
             if(exitActions) this.performActions(exitActions, "exit", eventName, eventArgs);
-
-
         }
 
         if (actions) this.performActions(actions, "transition", eventName, eventArgs);
 
-        //Setting new state
+        //Entering new state
         if (newState) {
 
             let entryActions = this.stateMap[newState].entry;
             this.state = newState;
+
             if(this.isInfo()) console.log(`%c ${this.name}: State is now set to ${this.state}`, 'color: #3502ff; font-size: 10px; font-weight: 600; ');
             if (entryActions) this.performActions(entryActions, "entry", eventName, eventArgs);
 
+            //Here we need to enter all the substates of current states
+            // and perform their entry actions
+            for( let substate of this.stateMap[this.state].substates){
+                substate.resume();
+            }
         }
     }
 
@@ -376,7 +241,7 @@ class StateMachine {
                 this.error = true;
                 throw new err.actionTypeInvalid(typeof action);
             }
-            action.call(this.obj, this, eventName, eventArgs);
+            action.call(this.obj, eventArgs, this, eventName);
         }
 
     }
@@ -428,11 +293,67 @@ class StateMachine {
             if (!stateMap[state].hasOwnProperty("transitions")){
                 stateMap[state].transitions = {}
             }
+
+            //making sure that substates is an array for each state
+            if(!stateMap[state].substates){
+                stateMap[state].substates = []
+            } else if (!Array.isArray(stateMap[state].substates)){
+                stateMap[state].substates = [ stateMap[state].substates ]
+            }
+
+            //And each substate must be an instance of StateMachine
+            for (let state of stateMap[state].substates){
+                if(!(state instanceof StateMachine)) throw new err.invalidSubstateType()
+            }
+
         }
 
         //Verify state map
         if(initialState.length === 0) throw new err.initStateNotInMap(`Initial state provided: ${initialState} || States: ${inspect(Object.keys(stateMap))}`);
         if(initialState.length > 1) throw new err.multipleInitialStates(inspect(initialState));
+    }
+
+    //Performs exit actions on current state and all of its substates
+    //and suspends itself
+    suspend(){
+
+        this.suspendSubstates()
+
+        let exitActions = this.stateMap[this.state].exit;
+        if(exitActions) this.performActions(exitActions, "exit", eventName, eventArgs);
+
+        if(!this.memory){
+            this.state = this.getInitialState()
+        }
+
+        this.active = false;
+    }
+
+    //suspends all the substates of the current state
+    suspendSubstates(){
+        // if there are any substates, we need to perform their exit actions
+        // and suspend them
+        for( let substate of this.stateMap[this.state].substates){
+            substate.suspend();
+        }
+    }
+
+    //Performs entry actions on a saved state and its substates
+    //and resumes itself
+    resume(){
+        let entryActions = this.stateMap[newState].entry;
+        if (entryActions) this.performActions(entryActions, "entry", eventName, eventArgs);
+        this.resumeSubstates();
+        this.active = true;
+    }
+
+    //Resumes all the substates of the current state
+    resumeSubstates(){
+        // if there are any substates, we need to perform their exit actions
+        // and suspend them
+        for( let substate of this.stateMap[this.state].substates){
+            substate.resume();
+        }
     }
 
     getInitialState(){
