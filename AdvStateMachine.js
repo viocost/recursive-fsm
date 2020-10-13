@@ -41,10 +41,11 @@ class StateMachine {
     }
 
 
-    constructor(obj, { stateMap, name = "State Machine", memory: true, isSubstate: false },
+    constructor(obj, { stateMap, name = "State Machine", memory = true, isSubstate = false },
         { msgNotExistMode = StateMachine.Discard, traceLevel = StateMachine.TraceLevel.INFO} = {}){
 
         this.validateStateMap(stateMap)
+        this.active = !isSubstate;
 
         this.obj = obj;
 
@@ -67,25 +68,29 @@ class StateMachine {
         this.state = this.getInitialState();
 
 
-        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-        // let entryNewState = this.stateMap[initialState].entry;                                                                                 //
-        // if (typeof entryNewState === "function") {                                                                                             //
-        //     if(this.trace) console.log(`%c ${this.name}: Calling entry action for "${initialState}"`,  'color: #009933;  font-weight: 600; '); //
-        //     entryNewState();                                                                                                                   //
-        // }                                                                                                                                      //
-        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-        let initialEntryActions =  this.stateMap[this.getInitialState()].entry;
-        if(initialEntryActions) {
-            this.performActions(initialEntryActions, "Initial entry", undefined, undefined);
-
-        } 
+        //If state machine is active
+        //Performing all entry actions and resuming all substates
+        if(this.active){
+            let initialEntryActions =  this.stateMap[this.getInitialState()].entry;
+            if(initialEntryActions) {
+                this.performActions(initialEntryActions, "Initial entry", undefined, undefined);
+            }
+            this.resumeSubstates();
+        }
 
 
+        //defining proxy for handle function
         this.handle = new Proxy(this, {
             get(target, prop) {
 
                 if(target.error) throw new err.blown(target.error);
+
+
+                if(!target.active) {
+                    if (this.isInfo()) console.log(`Received event for suspended state machine ${prop}. Ignoring...`)
+                    return;
+                }
 
                 if( target.legalEvents.has(prop))
                     return (...args) => {
