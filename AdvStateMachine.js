@@ -87,10 +87,6 @@ class StateMachine {
                 if(target.error) throw new err.blown(target.error);
 
 
-                if(!target.active) {
-                    if (this.isInfo()) console.log(`Received event for suspended state machine ${prop}. Ignoring...`)
-                    return;
-                }
 
                 if( target.legalEvents.has(prop))
                     return (...args) => {
@@ -163,14 +159,10 @@ class StateMachine {
 
     processEvent(eventName, eventArgs) {
 
-        ///////////////////////////////////////
-        // if I will change state            //
-        //   call exit actions               //
-        // call transition actions           //
-        // if  I will change state           //
-        //   change state                    //
-        //   call entry actions on new state //
-        ///////////////////////////////////////
+        if(!this.active) {
+            if (this.isInfo()) console.log(`Received event for suspended state machine ${eventName}. Ignoring...`)
+            return;
+        }
 
         if (this.isInfo()){
             console.log(`${this.name}: Current state: ${this.state}. `)
@@ -205,7 +197,7 @@ class StateMachine {
                 throw new err.stateNotExist(newState);
             }
 
-            this.suspendSubstates();
+            this.suspendSubstates(eventName, eventArgs);
 
             // Performing local exit actions;
             let exitActions = this.stateMap[this.state].exit;
@@ -226,7 +218,7 @@ class StateMachine {
             //Here we need to enter all the substates of current states
             // and perform their entry actions
             for( let substate of this.stateMap[this.state].substates){
-                substate.resume();
+                substate.resume(eventName, eventArgs);
             }
         }
     }
@@ -307,8 +299,8 @@ class StateMachine {
             }
 
             //And each substate must be an instance of StateMachine
-            for (let state of stateMap[state].substates){
-                if(!(state instanceof StateMachine)) throw new err.invalidSubstateType()
+            for (let substate of stateMap[state].substates){
+                if(!(substate instanceof StateMachine)) throw new err.invalidSubstateType()
             }
 
         }
@@ -320,9 +312,11 @@ class StateMachine {
 
     //Performs exit actions on current state and all of its substates
     //and suspends itself
-    suspend(){
+    suspend(eventName, eventArgs){
 
-        this.suspendSubstates()
+        console.log(`${this.name} SUSPENDING`);
+
+        this.suspendSubstates(eventName, eventArgs)
 
         let exitActions = this.stateMap[this.state].exit;
         if(exitActions) this.performActions(exitActions, "exit", eventName, eventArgs);
@@ -335,29 +329,29 @@ class StateMachine {
     }
 
     //suspends all the substates of the current state
-    suspendSubstates(){
+    suspendSubstates(eventName, eventArgs){
         // if there are any substates, we need to perform their exit actions
         // and suspend them
         for( let substate of this.stateMap[this.state].substates){
-            substate.suspend();
+            substate.suspend(eventName, eventArgs);
         }
     }
 
     //Performs entry actions on a saved state and its substates
     //and resumes itself
-    resume(){
-        let entryActions = this.stateMap[newState].entry;
+    resume(eventName, eventArgs){
+        let entryActions = this.stateMap[this.state].entry;
         if (entryActions) this.performActions(entryActions, "entry", eventName, eventArgs);
         this.resumeSubstates();
         this.active = true;
     }
 
     //Resumes all the substates of the current state
-    resumeSubstates(){
+    resumeSubstates(eventName, eventArgs){
         // if there are any substates, we need to perform their exit actions
         // and suspend them
         for( let substate of this.stateMap[this.state].substates){
-            substate.resume();
+            substate.resume(eventName, eventArgs);
         }
     }
 
