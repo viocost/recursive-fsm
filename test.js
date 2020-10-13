@@ -153,6 +153,8 @@ try{
 
 
     })
+
+    console.log("Invalid substate test failed");
 }catch(err){
-    console.log("Test passed");
+    console.log("Invalid substate test passed");
 }
